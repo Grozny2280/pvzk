@@ -11,6 +11,18 @@ def main_menu() -> ReplyKeyboardMarkup:
     )
 
 
+def superadmin_menu() -> ReplyKeyboardMarkup:
+    """Меню суперадмина — содержит кнопки сотрудника + управление."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🟢 Открыть смену")],
+            [KeyboardButton(text="☕ Взять перерыв"), KeyboardButton(text="✅ Закончить перерыв")],
+            [KeyboardButton(text="👥 Список сотрудников")],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def admin_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[

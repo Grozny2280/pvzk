@@ -7,7 +7,7 @@ from aiogram.filters import CommandStart
 
 from config import ADMIN_IDS, SUPERADMIN_IDS, PVZ_ADDRESS
 import database as db
-from keyboards import main_menu, admin_menu, approve_keyboard
+from keyboards import main_menu, superadmin_menu, admin_menu, approve_keyboard
 
 router = Router()
 
@@ -52,7 +52,9 @@ def fmt_time(s: str) -> str:
         return s
 
 def now_str() -> str:
-    return datetime.now().strftime("%d.%m.%Y %H:%M")
+    from datetime import timezone, timedelta
+    msk = timezone(timedelta(hours=3))
+    return datetime.now(msk).strftime("%d.%m.%Y %H:%M")
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
@@ -61,8 +63,22 @@ def now_str() -> str:
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
 
+    # Суперадмин — проверяем, зарегистрирован ли он как сотрудник
     if is_superadmin(user_id):
-        await message.answer("👋 Добро пожаловать, суперадмин!", reply_markup=admin_menu())
+        employee = await db.get_employee(user_id)
+        if employee and employee["approved"]:
+            await message.answer(
+                f"👋 С возвращением, {employee['full_name']}!\nВы суперадмин и сотрудник.",
+                reply_markup=superadmin_menu(),
+            )
+        else:
+            await message.answer(
+                "👋 Добро пожаловать, суперадмин!\n\n"
+                "Вы ещё не зарегистрированы как сотрудник.\n"
+                "📝 Введите ваше *полное имя* (Фамилия Имя Отчество):",
+                parse_mode="Markdown",
+            )
+            await state.set_state(Registration.waiting_name)
         return
 
     if is_admin(user_id):
@@ -116,8 +132,19 @@ async def reg_wb_id(message: Message, state: FSMContext, bot: Bot):
     telegram_id = message.from_user.id
 
     await db.register_employee(telegram_id, full_name, wb_id)
-    await state.clear()
 
+    # Суперадмин одобряется автоматически
+    if is_superadmin(telegram_id):
+        await db.approve_employee(telegram_id)
+        await state.clear()
+        await message.answer(
+            f"✅ Регистрация завершена! Добро пожаловать, *{full_name}*!",
+            parse_mode="Markdown",
+            reply_markup=superadmin_menu(),
+        )
+        return
+
+    await state.clear()
     await message.answer("✅ Заявка отправлена! Ожидайте одобрения администратора.")
 
     username = f"@{message.from_user.username}" if message.from_user.username else "нет"
@@ -217,7 +244,9 @@ async def shift_open_photo(message: Message, state: FSMContext, bot: Bot):
     await state.clear()
 
     now = now_str()
-    await message.answer(f"✅ Смена открыта в {now}! Хорошей работы, {employee['full_name']}! 💪", reply_markup=main_menu())
+    # Выбираем правильное меню для суперадмина
+    menu = superadmin_menu() if is_superadmin(message.from_user.id) else main_menu()
+    await message.answer(f"✅ Смена открыта в {now}! Хорошей работы, {employee['full_name']}! 💪", reply_markup=menu)
 
     text = (
         f"🟢 *Смена открыта*\n\n"
@@ -257,7 +286,8 @@ async def break_photo(message: Message, state: FSMContext, bot: Bot):
     await state.clear()
 
     now = now_str()
-    await message.answer(f"☕ Перерыв начат в {now}.\n\nНажмите «✅ Закончить перерыв» когда вернётесь.", reply_markup=main_menu())
+    menu = superadmin_menu() if is_superadmin(message.from_user.id) else main_menu()
+    await message.answer(f"☕ Перерыв начат в {now}.\n\nНажмите «✅ Закончить перерыв» когда вернётесь.", reply_markup=menu)
 
     text = (
         f"☕ *Перерыв начат*\n\n"
@@ -301,9 +331,10 @@ async def break_end(message: Message, bot: Bot):
     except Exception:
         dur_text = "—"
 
+    menu = superadmin_menu() if is_superadmin(message.from_user.id) else main_menu()
     await message.answer(
         f"✅ Перерыв завершён!\n\n⏱ С {fmt_time(start_str)} до {fmt_time(end_str)} ({dur_text})",
-        reply_markup=main_menu(),
+        reply_markup=menu,
     )
 
     text = (

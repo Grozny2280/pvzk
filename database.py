@@ -3,31 +3,34 @@ import os
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "pvz.db")
 
+# Московское время = UTC+3
+MSK_TIME = "datetime('now', '+3 hours')"
+
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
+        await db.execute(f"""
             CREATE TABLE IF NOT EXISTS employees (
                 telegram_id INTEGER PRIMARY KEY,
                 full_name TEXT NOT NULL,
                 wb_employee_id TEXT NOT NULL,
-                registered_at TEXT DEFAULT (datetime('now', 'localtime')),
+                registered_at TEXT DEFAULT ({MSK_TIME}),
                 approved INTEGER DEFAULT 0
             )
         """)
-        await db.execute("""
+        await db.execute(f"""
             CREATE TABLE IF NOT EXISTS shifts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_id INTEGER NOT NULL,
-                opened_at TEXT DEFAULT (datetime('now', 'localtime')),
+                opened_at TEXT DEFAULT ({MSK_TIME}),
                 photo_file_id TEXT
             )
         """)
-        await db.execute("""
+        await db.execute(f"""
             CREATE TABLE IF NOT EXISTS breaks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_id INTEGER NOT NULL,
-                started_at TEXT DEFAULT (datetime('now', 'localtime')),
+                started_at TEXT DEFAULT ({MSK_TIME}),
                 ended_at TEXT,
                 photo_file_id TEXT
             )
@@ -94,7 +97,10 @@ async def start_break(telegram_id: int, photo_file_id: str):
 
 async def end_break(break_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE breaks SET ended_at = datetime('now', 'localtime') WHERE id = ?", (break_id,))
+        await db.execute(
+            "UPDATE breaks SET ended_at = datetime('now', '+3 hours') WHERE id = ?",
+            (break_id,)
+        )
         await db.commit()
 
 
