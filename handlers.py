@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
@@ -12,6 +12,7 @@ from keyboards import main_menu, superadmin_menu, admin_menu, approve_keyboard
 router = Router()
 
 ALL_ADMINS = ADMIN_IDS + SUPERADMIN_IDS
+MSK = timezone(timedelta(hours=3))
 
 
 # ── FSM States ────────────────────────────────────────────────────────────────
@@ -21,6 +22,9 @@ class Registration(StatesGroup):
     waiting_wb_id = State()
 
 class ShiftOpen(StatesGroup):
+    waiting_photo = State()
+
+class ShiftClose(StatesGroup):
     waiting_photo = State()
 
 class BreakStart(StatesGroup):
@@ -45,6 +49,10 @@ def is_admin(user_id: int) -> bool:
 def is_superadmin(user_id: int) -> bool:
     return user_id in SUPERADMIN_IDS
 
+def get_menu(user_id: int):
+    """Возвращает правильное меню в зависимости от роли."""
+    return superadmin_menu() if is_superadmin(user_id) else main_menu()
+
 def fmt_time(s: str) -> str:
     try:
         return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").strftime("%H:%M")
@@ -52,29 +60,29 @@ def fmt_time(s: str) -> str:
         return s
 
 def now_str() -> str:
-    from datetime import timezone, timedelta
-    msk = timezone(timedelta(hours=3))
-    return datetime.now(msk).strftime("%d.%m.%Y %H:%M")
+    return datetime.now(MSK).strftime("%d.%m.%Y %H:%M")
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
     user_id = message.from_user.id
 
-    # Суперадмин — проверяем, зарегистрирован ли он как сотрудник
+    # Суперадмин — может работать и как сотрудник
     if is_superadmin(user_id):
         employee = await db.get_employee(user_id)
         if employee and employee["approved"]:
             await message.answer(
-                f"👋 С возвращением, {employee['full_name']}!\nВы суперадмин и сотрудник.",
+                f"👋 С возвращением, {employee['full_name']}!",
                 reply_markup=superadmin_menu(),
             )
         else:
+            # Не зарегистрирован — запускаем регистрацию
             await message.answer(
                 "👋 Добро пожаловать, суперадмин!\n\n"
-                "Вы ещё не зарегистрированы как сотрудник.\n"
+                "Для работы как сотрудник нужно зарегистрироваться.\n\n"
                 "📝 Введите ваше *полное имя* (Фамилия Имя Отчество):",
                 parse_mode="Markdown",
             )
@@ -82,7 +90,7 @@ async def cmd_start(message: Message, state: FSMContext):
         return
 
     if is_admin(user_id):
-        await message.answer("👋 Добро пожаловать! Вы получаете уведомления по ПВЗ.")
+        await message.answer("👋 Добро пожаловать! Вы получаете уведомления по ПВЗ.", reply_markup=admin_menu())
         return
 
     employee = await db.get_employee(user_id)
@@ -138,7 +146,7 @@ async def reg_wb_id(message: Message, state: FSMContext, bot: Bot):
         await db.approve_employee(telegram_id)
         await state.clear()
         await message.answer(
-            f"✅ Регистрация завершена! Добро пожаловать, *{full_name}*!",
+            f"✅ Готово! Добро пожаловать, *{full_name}*!",
             parse_mode="Markdown",
             reply_markup=superadmin_menu(),
         )
@@ -231,6 +239,10 @@ async def check_approved(message: Message) -> bool:
 async def shift_open(message: Message, state: FSMContext):
     if not await check_approved(message):
         return
+    active = await db.get_active_shift(message.from_user.id)
+    if active:
+        await message.answer("⚠️ У вас уже открыта смена. Сначала закройте её.")
+        return
     await message.answer("📸 Пришлите фото ПВЗ для подтверждения открытия смены:")
     await state.set_state(ShiftOpen.waiting_photo)
 
@@ -244,9 +256,10 @@ async def shift_open_photo(message: Message, state: FSMContext, bot: Bot):
     await state.clear()
 
     now = now_str()
-    # Выбираем правильное меню для суперадмина
-    menu = superadmin_menu() if is_superadmin(message.from_user.id) else main_menu()
-    await message.answer(f"✅ Смена открыта в {now}! Хорошей работы, {employee['full_name']}! 💪", reply_markup=menu)
+    await message.answer(
+        f"✅ Смена открыта в {now}!\nХорошей работы, {employee['full_name']}! 💪",
+        reply_markup=get_menu(message.from_user.id),
+    )
 
     text = (
         f"🟢 *Смена открыта*\n\n"
@@ -260,6 +273,69 @@ async def shift_open_photo(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(ShiftOpen.waiting_photo)
 async def shift_open_no_photo(message: Message):
+    await message.answer("❗ Нужно именно *фото*. Отправьте фотографию.", parse_mode="Markdown")
+
+
+# ── Закрытие смены ────────────────────────────────────────────────────────────
+
+@router.message(F.text == "🔴 Закрыть смену")
+async def shift_close(message: Message, state: FSMContext):
+    if not await check_approved(message):
+        return
+    active = await db.get_active_shift(message.from_user.id)
+    if not active:
+        await message.answer("⚠️ Нет открытой смены.")
+        return
+    await message.answer("📸 Пришлите фото ПВЗ для подтверждения закрытия смены:")
+    await state.set_state(ShiftClose.waiting_photo)
+
+
+@router.message(ShiftClose.waiting_photo, F.photo)
+async def shift_close_photo(message: Message, state: FSMContext, bot: Bot):
+    active = await db.get_active_shift(message.from_user.id)
+    if not active:
+        await state.clear()
+        await message.answer("⚠️ Нет открытой смены.")
+        return
+
+    employee = await db.get_employee(message.from_user.id)
+    photo_id = message.photo[-1].file_id
+
+    await db.close_shift(active["id"], photo_id)
+    await state.clear()
+
+    open_str = active["opened_at"]
+    now = now_str()
+
+    try:
+        open_dt = datetime.strptime(open_str, "%Y-%m-%d %H:%M:%S")
+        close_dt = datetime.now(MSK).replace(tzinfo=None)
+        duration = int((close_dt - open_dt).total_seconds() // 60)
+        hours, mins = divmod(duration, 60)
+        dur_text = f"{hours}ч {mins}мин." if hours else f"{mins} мин."
+    except Exception:
+        dur_text = "—"
+
+    await message.answer(
+        f"🔴 Смена закрыта в {now}!\n\n"
+        f"⏱ Открыта в {fmt_time(open_str)}, закрыта в {now.split(' ')[1]}\n"
+        f"📊 Длительность: {dur_text}",
+        reply_markup=get_menu(message.from_user.id),
+    )
+
+    text = (
+        f"🔴 *Смена закрыта*\n\n"
+        f"👤 Менеджер: {employee['full_name']}\n"
+        f"🏷 WB ID: `{employee['wb_employee_id']}`\n"
+        f"📍 ПВЗ: {PVZ_ADDRESS}\n"
+        f"🕐 Открыта в {fmt_time(open_str)}, закрыта в {now.split(' ')[1]}\n"
+        f"⏱ Длительность: {dur_text}"
+    )
+    await notify_admins(bot, text, photo_id)
+
+
+@router.message(ShiftClose.waiting_photo)
+async def shift_close_no_photo(message: Message):
     await message.answer("❗ Нужно именно *фото*. Отправьте фотографию.", parse_mode="Markdown")
 
 
@@ -286,8 +362,10 @@ async def break_photo(message: Message, state: FSMContext, bot: Bot):
     await state.clear()
 
     now = now_str()
-    menu = superadmin_menu() if is_superadmin(message.from_user.id) else main_menu()
-    await message.answer(f"☕ Перерыв начат в {now}.\n\nНажмите «✅ Закончить перерыв» когда вернётесь.", reply_markup=menu)
+    await message.answer(
+        f"☕ Перерыв начат в {now}.\n\nНажмите «✅ Закончить перерыв» когда вернётесь.",
+        reply_markup=get_menu(message.from_user.id),
+    )
 
     text = (
         f"☕ *Перерыв начат*\n\n"
@@ -331,10 +409,9 @@ async def break_end(message: Message, bot: Bot):
     except Exception:
         dur_text = "—"
 
-    menu = superadmin_menu() if is_superadmin(message.from_user.id) else main_menu()
     await message.answer(
         f"✅ Перерыв завершён!\n\n⏱ С {fmt_time(start_str)} до {fmt_time(end_str)} ({dur_text})",
-        reply_markup=menu,
+        reply_markup=get_menu(message.from_user.id),
     )
 
     text = (
