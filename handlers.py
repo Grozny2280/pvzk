@@ -5,7 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
-from config import ADMIN_IDS, SUPERADMIN_IDS, PVZ_ADDRESS
+from config import ADMIN_IDS, SUPERADMIN_IDS, PVZ_ADDRESS, GROUP_CHAT_ID
 import database as db
 from keyboards import main_menu, superadmin_menu, admin_menu, approve_keyboard
 
@@ -34,6 +34,7 @@ class BreakStart(StatesGroup):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def notify_admins(bot: Bot, text: str, photo_file_id: str = None):
+    """Уведомление только в личку админам (регистрации, служебное)."""
     for admin_id in ALL_ADMINS:
         try:
             if photo_file_id:
@@ -43,6 +44,30 @@ async def notify_admins(bot: Bot, text: str, photo_file_id: str = None):
         except Exception:
             pass
 
+
+async def notify_shift(bot: Bot, text: str, photo_file_id: str = None):
+    """Уведомление о сменах/перерывах — в личку админам И в групповой чат."""
+    # Личка админам
+    for admin_id in ALL_ADMINS:
+        try:
+            if photo_file_id:
+                await bot.send_photo(admin_id, photo=photo_file_id, caption=text, parse_mode="Markdown")
+            else:
+                await bot.send_message(admin_id, text, parse_mode="Markdown")
+        except Exception:
+            pass
+
+    # Групповой чат
+    if GROUP_CHAT_ID:
+        try:
+            if photo_file_id:
+                await bot.send_photo(GROUP_CHAT_ID, photo=photo_file_id, caption=text, parse_mode="Markdown")
+            else:
+                await bot.send_message(GROUP_CHAT_ID, text, parse_mode="Markdown")
+        except Exception:
+            pass
+
+
 def is_admin(user_id: int) -> bool:
     return user_id in ALL_ADMINS
 
@@ -50,7 +75,6 @@ def is_superadmin(user_id: int) -> bool:
     return user_id in SUPERADMIN_IDS
 
 def get_menu(user_id: int):
-    """Возвращает правильное меню в зависимости от роли."""
     return superadmin_menu() if is_superadmin(user_id) else main_menu()
 
 def fmt_time(s: str) -> str:
@@ -70,7 +94,6 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
 
-    # Суперадмин — может работать и как сотрудник
     if is_superadmin(user_id):
         employee = await db.get_employee(user_id)
         if employee and employee["approved"]:
@@ -79,7 +102,6 @@ async def cmd_start(message: Message, state: FSMContext):
                 reply_markup=superadmin_menu(),
             )
         else:
-            # Не зарегистрирован — запускаем регистрацию
             await message.answer(
                 "👋 Добро пожаловать, суперадмин!\n\n"
                 "Для работы как сотрудник нужно зарегистрироваться.\n\n"
@@ -110,6 +132,13 @@ async def cmd_start(message: Message, state: FSMContext):
         parse_mode="Markdown",
     )
     await state.set_state(Registration.waiting_name)
+
+
+# ── Команда /chatid — узнать ID чата ─────────────────────────────────────────
+
+@router.message(F.text == "/chatid")
+async def cmd_chatid(message: Message):
+    await message.answer(f"Chat ID: `{message.chat.id}`", parse_mode="Markdown")
 
 
 # ── Регистрация ───────────────────────────────────────────────────────────────
@@ -155,6 +184,7 @@ async def reg_wb_id(message: Message, state: FSMContext, bot: Bot):
     await state.clear()
     await message.answer("✅ Заявка отправлена! Ожидайте одобрения администратора.")
 
+    # Заявки на регистрацию — только в личку суперадминам (не в чат)
     username = f"@{message.from_user.username}" if message.from_user.username else "нет"
     text = (
         f"🆕 *Новая заявка на регистрацию*\n\n"
@@ -268,7 +298,7 @@ async def shift_open_photo(message: Message, state: FSMContext, bot: Bot):
         f"📍 ПВЗ: {PVZ_ADDRESS}\n"
         f"🕐 Время: {now}"
     )
-    await notify_admins(bot, text, photo_id)
+    await notify_shift(bot, text, photo_id)
 
 
 @router.message(ShiftOpen.waiting_photo)
@@ -331,7 +361,7 @@ async def shift_close_photo(message: Message, state: FSMContext, bot: Bot):
         f"🕐 Открыта в {fmt_time(open_str)}, закрыта в {now.split(' ')[1]}\n"
         f"⏱ Длительность: {dur_text}"
     )
-    await notify_admins(bot, text, photo_id)
+    await notify_shift(bot, text, photo_id)
 
 
 @router.message(ShiftClose.waiting_photo)
@@ -374,7 +404,7 @@ async def break_photo(message: Message, state: FSMContext, bot: Bot):
         f"📍 ПВЗ: {PVZ_ADDRESS}\n"
         f"🕐 Начало: {now}"
     )
-    await notify_admins(bot, text, photo_id)
+    await notify_shift(bot, text, photo_id)
 
 
 @router.message(BreakStart.waiting_photo)
@@ -422,7 +452,7 @@ async def break_end(message: Message, bot: Bot):
         f"🕐 С {fmt_time(start_str)} до {fmt_time(end_str)}\n"
         f"⏱ Длительность: {dur_text}"
     )
-    await notify_admins(bot, text, active["photo_file_id"])
+    await notify_shift(bot, text, active["photo_file_id"])
 
 
 # ── Список сотрудников ────────────────────────────────────────────────────────
