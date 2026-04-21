@@ -17,7 +17,6 @@ async def init_db():
                 approved INTEGER DEFAULT 0
             )
         """)
-        # Используем photo_open_file_id и closed_at
         await db.execute(f"""
             CREATE TABLE IF NOT EXISTS shifts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,7 +38,7 @@ async def init_db():
         """)
         await db.commit()
 
-        # Миграция: добавить колонки если таблица shifts уже существует со старой схемой
+        # Миграции для старых БД
         for col, definition in [
             ("closed_at", "TEXT"),
             ("photo_open_file_id", "TEXT"),
@@ -49,9 +48,7 @@ async def init_db():
                 await db.execute(f"ALTER TABLE shifts ADD COLUMN {col} {definition}")
                 await db.commit()
             except Exception:
-                pass  # Колонка уже есть
-
-        # Миграция старого поля photo_file_id -> photo_open_file_id
+                pass
         try:
             await db.execute("UPDATE shifts SET photo_open_file_id = photo_file_id WHERE photo_open_file_id IS NULL AND photo_file_id IS NOT NULL")
             await db.commit()
@@ -91,6 +88,15 @@ async def get_all_employees():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM employees ORDER BY registered_at DESC") as cur:
+            return await cur.fetchall()
+
+
+async def get_approved_employees():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM employees WHERE approved = 1 ORDER BY full_name"
+        ) as cur:
             return await cur.fetchall()
 
 
@@ -159,3 +165,44 @@ async def get_break_by_id(break_id: int):
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM breaks WHERE id = ?", (break_id,)) as cur:
             return await cur.fetchone()
+
+
+# ── Статистика ────────────────────────────────────────────────────────────────
+
+async def get_shifts_this_week(telegram_id: int):
+    """Смены за текущую неделю (пн–вс по МСК)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT * FROM shifts
+            WHERE telegram_id = ?
+              AND date(opened_at) >= date(datetime('now', '+3 hours'), 'weekday 0', '-7 days')
+            ORDER BY opened_at DESC
+        """, (telegram_id,)) as cur:
+            return await cur.fetchall()
+
+
+async def get_breaks_by_day(telegram_id: int, day: str):
+    """Перерывы за конкретный день (формат YYYY-MM-DD)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT * FROM breaks
+            WHERE telegram_id = ?
+              AND date(started_at) = ?
+            ORDER BY started_at ASC
+        """, (telegram_id, day)) as cur:
+            return await cur.fetchall()
+
+
+async def get_distinct_break_days(telegram_id: int):
+    """Список уникальных дней, когда были перерывы (последние 30 дней)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""
+            SELECT DISTINCT date(started_at) as day FROM breaks
+            WHERE telegram_id = ?
+              AND date(started_at) >= date(datetime('now', '+3 hours'), '-30 days')
+            ORDER BY day DESC
+        """, (telegram_id,)) as cur:
+            rows = await cur.fetchall()
+            return [r[0] for r in rows]
