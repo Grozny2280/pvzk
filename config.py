@@ -4,7 +4,7 @@ BOT_TOKEN = "8785991635:AAGuTEE4ev17ZDXqQLXwqvRxx0hX1TpwHdk"
 ADMIN_IDS = [681373290, 8166988870]
 
 # Суперадмин — может одобрять сотрудников и смотреть список
-SUPERADMIN_IDS = [5239329589]
+SUPERADMIN_IDS = [5239329589, 681373290]
 
 PVZ_ADDRESS = "Варшавское шоссе 170е к11"
 
