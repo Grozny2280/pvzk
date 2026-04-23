@@ -3,7 +3,7 @@ from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 
 from config import ADMIN_IDS, SUPERADMIN_IDS, PVZ_ADDRESS, GROUP_CHAT_ID
 import database as db
@@ -36,8 +36,31 @@ class BreakStart(StatesGroup):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+async def send_to_chat(bot: Bot, text: str, photo_file_id: str = None):
+    """Отправка в групповой чат. Логирует ошибку если не получилось."""
+    if not GROUP_CHAT_ID:
+        return
+    try:
+        if photo_file_id:
+            await bot.send_photo(
+                chat_id=GROUP_CHAT_ID,
+                photo=photo_file_id,
+                caption=text,
+                parse_mode="Markdown",
+            )
+        else:
+            await bot.send_message(
+                chat_id=GROUP_CHAT_ID,
+                text=text,
+                parse_mode="Markdown",
+            )
+    except Exception as e:
+        import logging
+        logging.error(f"[GROUP CHAT ERROR] chat_id={GROUP_CHAT_ID}: {e}")
+
+
 async def notify_admins(bot: Bot, text: str, photo_file_id: str = None):
-    """Только в личку админам (регистрации)."""
+    """Только в личку всем админам."""
     for admin_id in ALL_ADMINS:
         try:
             if photo_file_id:
@@ -49,23 +72,64 @@ async def notify_admins(bot: Bot, text: str, photo_file_id: str = None):
 
 
 async def notify_shift(bot: Bot, text: str, photo_file_id: str = None):
-    """Смены/перерывы — в личку админам и в групповой чат."""
-    for admin_id in ALL_ADMINS:
-        try:
-            if photo_file_id:
-                await bot.send_photo(admin_id, photo=photo_file_id, caption=text, parse_mode="Markdown")
-            else:
-                await bot.send_message(admin_id, text, parse_mode="Markdown")
-        except Exception:
-            pass
-    if GROUP_CHAT_ID:
-        try:
-            if photo_file_id:
-                await bot.send_photo(GROUP_CHAT_ID, photo=photo_file_id, caption=text, parse_mode="Markdown")
-            else:
-                await bot.send_message(GROUP_CHAT_ID, text, parse_mode="Markdown")
-        except Exception:
-            pass
+    """Смены/перерывы — в личку администраторам И в групповой чат."""
+    await notify_admins(bot, text, photo_file_id)
+    await send_to_chat(bot, text, photo_file_id)
+
+
+def fmt_mins(m: int) -> str:
+    if m == 0:
+        return "0м"
+    h, mn = divmod(m, 60)
+    return f"{h}ч {mn}м" if h else f"{mn}м"
+
+
+async def build_weekly_report() -> str:
+    """Формирует текст еженедельного отчёта по всем сотрудникам."""
+    employees = await db.get_approved_employees()
+    now = datetime.now(MSK)
+    monday = now - timedelta(days=now.weekday())
+    week_start = monday.strftime("%d.%m")
+    week_end = now.strftime("%d.%m.%Y")
+
+    lines = [f"📊 *Итоги недели {week_start}–{week_end}*\n"]
+
+    if not employees:
+        lines.append("Сотрудников пока нет.")
+        return "\n".join(lines)
+
+    for emp in employees:
+        tid = emp["telegram_id"]
+        shifts = await db.get_shifts_this_week(tid)
+        breaks = await db.get_breaks_for_week(tid)
+
+        total_shift_mins = 0
+        for s in shifts:
+            if s["opened_at"] and s["closed_at"]:
+                try:
+                    o = datetime.strptime(s["opened_at"], "%Y-%m-%d %H:%M:%S")
+                    c = datetime.strptime(s["closed_at"], "%Y-%m-%d %H:%M:%S")
+                    total_shift_mins += int((c - o).total_seconds() // 60)
+                except Exception:
+                    pass
+
+        total_break_mins = 0
+        for b in breaks:
+            if b["started_at"] and b["ended_at"]:
+                try:
+                    s_dt = datetime.strptime(b["started_at"], "%Y-%m-%d %H:%M:%S")
+                    e_dt = datetime.strptime(b["ended_at"], "%Y-%m-%d %H:%M:%S")
+                    total_break_mins += int((e_dt - s_dt).total_seconds() // 60)
+                except Exception:
+                    pass
+
+        lines.append(
+            f"👤 *{emp['full_name']}*\n"
+            f"   📅 Смен: {len(shifts)}  ⏱ {fmt_mins(total_shift_mins)}\n"
+            f"   ☕ Перерывов: {len(breaks)}  ⏱ {fmt_mins(total_break_mins)}\n"
+        )
+
+    return "\n".join(lines)
 
 
 def is_admin(user_id: int) -> bool:
@@ -75,7 +139,6 @@ def is_superadmin(user_id: int) -> bool:
     return user_id in SUPERADMIN_IDS
 
 def can_view_stats(user_id: int) -> bool:
-    """Статистику могут смотреть все админы (управляющие + суперадмин)."""
     return user_id in ALL_ADMINS
 
 def get_menu(user_id: int):
@@ -139,9 +202,22 @@ async def cmd_start(message: Message, state: FSMContext):
 
 # ── /chatid ───────────────────────────────────────────────────────────────────
 
-@router.message(F.text == "/chatid")
+@router.message(Command("chatid"))
 async def cmd_chatid(message: Message):
-    await message.answer(f"Chat ID: `{message.chat.id}`", parse_mode="Markdown")
+    await message.answer(f"Chat ID этого чата: `{message.chat.id}`", parse_mode="Markdown")
+
+
+# ── /weekly_report — ручной запуск отчёта ────────────────────────────────────
+
+@router.message(Command("weekly_report"))
+async def cmd_weekly_report(message: Message, bot: Bot):
+    if not can_view_stats(message.from_user.id):
+        await message.answer("❗ Нет доступа.")
+        return
+    await message.answer("⏳ Формирую отчёт...")
+    text = await build_weekly_report()
+    await send_to_chat(bot, text)
+    await message.answer(text, parse_mode="Markdown")
 
 
 # ── Регистрация ───────────────────────────────────────────────────────────────
@@ -166,11 +242,9 @@ async def reg_wb_id(message: Message, state: FSMContext, bot: Bot):
     if not wb_id:
         await message.answer("❗ Введите ID сотрудника.")
         return
-
     data = await state.get_data()
     full_name = data["full_name"]
     telegram_id = message.from_user.id
-
     await db.register_employee(telegram_id, full_name, wb_id)
 
     if is_superadmin(telegram_id):
@@ -185,7 +259,6 @@ async def reg_wb_id(message: Message, state: FSMContext, bot: Bot):
 
     await state.clear()
     await message.answer("✅ Заявка отправлена! Ожидайте одобрения администратора.")
-
     username = f"@{message.from_user.username}" if message.from_user.username else "нет"
     text = (
         f"🆕 *Новая заявка на регистрацию*\n\n"
@@ -455,7 +528,7 @@ async def list_employees(message: Message):
     await message.answer("\n".join(lines), parse_mode="Markdown")
 
 
-# ── Статистика: выбор сотрудника ──────────────────────────────────────────────
+# ── Статистика ────────────────────────────────────────────────────────────────
 
 @router.message(F.text == "📊 Статистика")
 async def stats_pick_employee(message: Message):
@@ -466,10 +539,7 @@ async def stats_pick_employee(message: Message):
     if not employees:
         await message.answer("Одобренных сотрудников пока нет.")
         return
-    await message.answer(
-        "👤 Выберите сотрудника:",
-        reply_markup=staff_picker_keyboard(employees),
-    )
+    await message.answer("👤 Выберите сотрудника:", reply_markup=staff_picker_keyboard(employees))
 
 
 @router.callback_query(F.data.startswith("stat_emp:"))
@@ -490,8 +560,6 @@ async def stats_pick_type(callback: CallbackQuery):
     await callback.answer()
 
 
-# ── Статистика: смены за неделю ───────────────────────────────────────────────
-
 @router.callback_query(F.data.startswith("stat_shifts:"))
 async def stats_shifts_week(callback: CallbackQuery):
     if not can_view_stats(callback.from_user.id):
@@ -500,7 +568,6 @@ async def stats_shifts_week(callback: CallbackQuery):
     telegram_id = int(callback.data.split(":")[1])
     employee = await db.get_employee(telegram_id)
     shifts = await db.get_shifts_this_week(telegram_id)
-
     if not shifts:
         await callback.message.edit_text(
             f"👤 *{employee['full_name']}*\n\n📅 Смен за эту неделю: *0*",
@@ -508,22 +575,19 @@ async def stats_shifts_week(callback: CallbackQuery):
         )
         await callback.answer()
         return
-
     lines = [f"👤 *{employee['full_name']}*\n📅 Смены за эту неделю: *{len(shifts)}*\n"]
     for i, s in enumerate(shifts, 1):
         opened = fmt_time(s["opened_at"])
-        date = s["opened_at"][:10] if s["opened_at"] else "—"
         try:
-            date_fmt = datetime.strptime(date, "%Y-%m-%d").strftime("%d.%m")
+            date_fmt = datetime.strptime(s["opened_at"][:10], "%Y-%m-%d").strftime("%d.%m")
         except Exception:
-            date_fmt = date
-
+            date_fmt = "—"
         if s["closed_at"]:
             closed = fmt_time(s["closed_at"])
             try:
-                open_dt = datetime.strptime(s["opened_at"], "%Y-%m-%d %H:%M:%S")
-                close_dt = datetime.strptime(s["closed_at"], "%Y-%m-%d %H:%M:%S")
-                mins = int((close_dt - open_dt).total_seconds() // 60)
+                o = datetime.strptime(s["opened_at"], "%Y-%m-%d %H:%M:%S")
+                c = datetime.strptime(s["closed_at"], "%Y-%m-%d %H:%M:%S")
+                mins = int((c - o).total_seconds() // 60)
                 h, m = divmod(mins, 60)
                 dur = f"{h}ч {m}м" if h else f"{m}м"
             except Exception:
@@ -531,12 +595,9 @@ async def stats_shifts_week(callback: CallbackQuery):
             lines.append(f"{i}. {date_fmt} — {opened}–{closed} ({dur})")
         else:
             lines.append(f"{i}. {date_fmt} — {opened}–… (не закрыта)")
-
     await callback.message.edit_text("\n".join(lines), parse_mode="Markdown")
     await callback.answer()
 
-
-# ── Статистика: выбор дня для перерывов ──────────────────────────────────────
 
 @router.callback_query(F.data.startswith("stat_breaks_days:"))
 async def stats_breaks_pick_day(callback: CallbackQuery):
@@ -546,7 +607,6 @@ async def stats_breaks_pick_day(callback: CallbackQuery):
     telegram_id = int(callback.data.split(":")[1])
     employee = await db.get_employee(telegram_id)
     days = await db.get_distinct_break_days(telegram_id)
-
     await callback.message.edit_text(
         f"👤 *{employee['full_name']}*\n\n☕ Выберите день:",
         parse_mode="Markdown",
@@ -555,26 +615,20 @@ async def stats_breaks_pick_day(callback: CallbackQuery):
     await callback.answer()
 
 
-# ── Статистика: перерывы за выбранный день ────────────────────────────────────
-
 @router.callback_query(F.data.startswith("stat_breaks:"))
 async def stats_breaks_day(callback: CallbackQuery):
     if not can_view_stats(callback.from_user.id):
         await callback.answer("Нет доступа.", show_alert=True)
         return
-
     parts = callback.data.split(":")
     telegram_id = int(parts[1])
-    day = parts[2]  # YYYY-MM-DD
-
+    day = parts[2]
     employee = await db.get_employee(telegram_id)
     breaks = await db.get_breaks_by_day(telegram_id, day)
-
     try:
         day_fmt = datetime.strptime(day, "%Y-%m-%d").strftime("%d.%m.%Y")
     except Exception:
         day_fmt = day
-
     if not breaks:
         await callback.message.edit_text(
             f"👤 *{employee['full_name']}*\n☕ Перерывы за {day_fmt}: *нет*",
@@ -582,7 +636,6 @@ async def stats_breaks_day(callback: CallbackQuery):
         )
         await callback.answer()
         return
-
     total_mins = 0
     lines = [f"👤 *{employee['full_name']}*\n☕ Перерывы за {day_fmt}: *{len(breaks)}*\n"]
     for i, b in enumerate(breaks, 1):
@@ -599,12 +652,8 @@ async def stats_breaks_day(callback: CallbackQuery):
                 lines.append(f"{i}. {start}–{end}")
         else:
             lines.append(f"{i}. {start}–… (активен)")
-
     if total_mins:
-        h, m = divmod(total_mins, 60)
-        total_str = f"{h}ч {m}мин." if h else f"{total_mins} мин."
-        lines.append(f"\n⏱ Итого: {total_str}")
-
+        lines.append(f"\n⏱ Итого: {fmt_mins(total_mins)}")
     await callback.message.edit_text("\n".join(lines), parse_mode="Markdown")
     await callback.answer()
 

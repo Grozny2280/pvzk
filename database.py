@@ -50,7 +50,10 @@ async def init_db():
             except Exception:
                 pass
         try:
-            await db.execute("UPDATE shifts SET photo_open_file_id = photo_file_id WHERE photo_open_file_id IS NULL AND photo_file_id IS NOT NULL")
+            await db.execute(
+                "UPDATE shifts SET photo_open_file_id = photo_file_id "
+                "WHERE photo_open_file_id IS NULL AND photo_file_id IS NOT NULL"
+            )
             await db.commit()
         except Exception:
             pass
@@ -147,7 +150,10 @@ async def get_active_break(telegram_id: int):
 
 async def start_break(telegram_id: int, photo_file_id: str):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT INTO breaks (telegram_id, photo_file_id) VALUES (?, ?)", (telegram_id, photo_file_id))
+        await db.execute(
+            "INSERT INTO breaks (telegram_id, photo_file_id) VALUES (?, ?)",
+            (telegram_id, photo_file_id)
+        )
         await db.commit()
 
 
@@ -170,20 +176,33 @@ async def get_break_by_id(break_id: int):
 # ── Статистика ────────────────────────────────────────────────────────────────
 
 async def get_shifts_this_week(telegram_id: int):
-    """Смены за текущую неделю (пн–вс по МСК)."""
+    """Смены с понедельника текущей недели по МСК."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
             SELECT * FROM shifts
             WHERE telegram_id = ?
-              AND date(opened_at) >= date(datetime('now', '+3 hours'), 'weekday 0', '-7 days')
+              AND date(opened_at) >= date(datetime('now', '+3 hours'), 'weekday 1', '-7 days')
             ORDER BY opened_at DESC
         """, (telegram_id,)) as cur:
             return await cur.fetchall()
 
 
+async def get_breaks_for_week(telegram_id: int):
+    """Перерывы с понедельника текущей недели по МСК."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT * FROM breaks
+            WHERE telegram_id = ?
+              AND date(started_at) >= date(datetime('now', '+3 hours'), 'weekday 1', '-7 days')
+            ORDER BY started_at ASC
+        """, (telegram_id,)) as cur:
+            return await cur.fetchall()
+
+
 async def get_breaks_by_day(telegram_id: int, day: str):
-    """Перерывы за конкретный день (формат YYYY-MM-DD)."""
+    """Перерывы за конкретный день (YYYY-MM-DD)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
@@ -196,7 +215,7 @@ async def get_breaks_by_day(telegram_id: int, day: str):
 
 
 async def get_distinct_break_days(telegram_id: int):
-    """Список уникальных дней, когда были перерывы (последние 30 дней)."""
+    """Уникальные дни с перерывами за последние 30 дней."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("""
             SELECT DISTINCT date(started_at) as day FROM breaks
