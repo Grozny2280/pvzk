@@ -176,7 +176,6 @@ async def get_break_by_id(break_id: int):
 # ── Статистика ────────────────────────────────────────────────────────────────
 
 async def get_shifts_this_week(telegram_id: int):
-    """Смены с понедельника текущей недели по МСК."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
@@ -189,7 +188,6 @@ async def get_shifts_this_week(telegram_id: int):
 
 
 async def get_breaks_for_week(telegram_id: int):
-    """Перерывы с понедельника текущей недели по МСК."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
@@ -202,7 +200,6 @@ async def get_breaks_for_week(telegram_id: int):
 
 
 async def get_breaks_by_day(telegram_id: int, day: str):
-    """Перерывы за конкретный день (YYYY-MM-DD)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
@@ -215,7 +212,6 @@ async def get_breaks_by_day(telegram_id: int, day: str):
 
 
 async def get_distinct_break_days(telegram_id: int):
-    """Уникальные дни с перерывами за последние 30 дней."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("""
             SELECT DISTINCT date(started_at) as day FROM breaks
@@ -225,3 +221,29 @@ async def get_distinct_break_days(telegram_id: int):
         """, (telegram_id,)) as cur:
             rows = await cur.fetchall()
             return [r[0] for r in rows]
+
+
+# ── НОВЫЕ ФУНКЦИИ для активных смен и отчёта ─────────────────────────────────
+
+async def count_active_shifts() -> int:
+    """Возвращает количество активных (незакрытых) смен у всех сотрудников."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM shifts WHERE closed_at IS NULL"
+        ) as cur:
+            result = await cur.fetchone()
+            return result[0] if result else 0
+
+
+async def get_all_active_shifts():
+    """Возвращает все активные смены с информацией о сотрудниках."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT s.*, e.full_name, e.wb_employee_id
+            FROM shifts s
+            JOIN employees e ON s.telegram_id = e.telegram_id
+            WHERE s.closed_at IS NULL
+            ORDER BY s.opened_at ASC
+        """) as cur:
+            return await cur.fetchall()
